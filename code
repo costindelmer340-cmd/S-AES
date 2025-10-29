@@ -1,0 +1,1574 @@
+import tkinter as tk
+from tkinter import ttk, messagebox, scrolledtext
+import numpy as np
+import random
+
+class DebugSAES:
+    def __init__(self):
+        # 标准S-AES S盒
+        self.S_BOX = [
+            [0x9, 0x4, 0xA, 0xB],
+            [0xD, 0x1, 0x8, 0x5],
+            [0x6, 0x2, 0x0, 0x3],
+            [0xC, 0xE, 0xF, 0x7]
+        ]
+        
+        self.INV_S_BOX = [
+            [0xA, 0x5, 0x9, 0xB],
+            [0x1, 0x7, 0x8, 0xF],
+            [0x6, 0x0, 0x2, 0x3],
+            [0xC, 0x4, 0xD, 0xE]
+        ]
+        
+        self.RCON = [0x80, 0x30]  # 10000000, 00110000
+        self.debug = False
+    
+    def enable_debug(self):
+        self.debug = True
+    
+    def disable_debug(self):
+        self.debug = False
+    
+    def text_to_binary(self, text):
+        """将文本转换为二进制字符串"""
+        return ''.join(format(ord(c), '08b') for c in text)
+    
+    def binary_to_text(self, binary_str):
+        """将二进制字符串转换为文本"""
+        chars = []
+        for i in range(0, len(binary_str), 8):
+            byte = binary_str[i:i+8]
+            if byte != '00000000':  # 忽略填充的null字节
+                chars.append(chr(int(byte, 2)))
+        return ''.join(chars)
+    
+    def string_to_state(self, input_str):
+        """将16位字符串转换为状态矩阵"""
+        if len(input_str) != 16:
+            raise ValueError(f"输入必须是16位，当前长度: {len(input_str)}")
+        
+        state = np.zeros((2, 2), dtype=int)
+        state[0, 0] = int(input_str[0:4], 2)
+        state[1, 0] = int(input_str[4:8], 2)
+        state[0, 1] = int(input_str[8:12], 2)
+        state[1, 1] = int(input_str[12:16], 2)
+        
+        if self.debug:
+            print(f"字符串转状态: {input_str} ->")
+            print(state)
+        
+        return state
+    
+    def state_to_string(self, state):
+        """将状态矩阵转换为16位字符串"""
+        binary_str = ""
+        binary_str += format(state[0, 0], '04b')
+        binary_str += format(state[1, 0], '04b')
+        binary_str += format(state[0, 1], '04b')
+        binary_str += format(state[1, 1], '04b')
+        
+        if self.debug:
+            print(f"状态转字符串:")
+            print(state, "->", binary_str)
+        
+        return binary_str
+    
+    def key_expansion(self, key):
+        """密钥扩展"""
+        if len(key) != 16:
+            raise ValueError(f"密钥必须是16位，当前长度: {len(key)}")
+        
+        w0 = key[0:8]
+        w1 = key[8:16]
+        
+        if self.debug:
+            print(f"\n=== 密钥扩展 ===")
+            print(f"w0: {w0}, w1: {w1}")
+        
+        # 计算w2
+        temp = self.g_function(w1, 1)
+        w2 = self.xor_binary(w0, temp)
+        
+        # 计算w3
+        w3 = self.xor_binary(w2, w1)
+        
+        # 计算w4
+        temp = self.g_function(w3, 2)
+        w4 = self.xor_binary(w2, temp)
+        
+        # 计算w5
+        w5 = self.xor_binary(w4, w3)
+        
+        round_keys = [w0 + w1, w2 + w3, w4 + w5]
+        
+        if self.debug:
+            print(f"g(w1): {temp}")
+            print(f"w2: {w2}, w3: {w3}")
+            print(f"w4: {w4}, w5: {w5}")
+            print(f"轮密钥0: {round_keys[0]}")
+            print(f"轮密钥1: {round_keys[1]}")
+            print(f"轮密钥2: {round_keys[2]}")
+        
+        return round_keys
+    
+    def g_function(self, word, round_num):
+        """g函数"""
+        # 循环左移4位
+        rotated = word[4:8] + word[0:4]
+        
+        # 半字节代替
+        sub_nibbles = ""
+        sub_nibbles += self.nibble_substitution(rotated[0:4], self.S_BOX)
+        sub_nibbles += self.nibble_substitution(rotated[4:8], self.S_BOX)
+        
+        # 与RCON异或
+        rcon_bin = format(self.RCON[round_num-1], '08b')
+        result = self.xor_binary(sub_nibbles, rcon_bin)
+        
+        if self.debug:
+            print(f"g函数(轮{round_num}):")
+            print(f"  输入: {word}")
+            print(f"  循环移位: {rotated}")
+            print(f"  S盒替换: {sub_nibbles}")
+            print(f"  RCON: {rcon_bin}")
+            print(f"  结果: {result}")
+        
+        return result
+    
+    def nibble_substitution(self, nibble, s_box):
+        """半字节代替"""
+        if len(nibble) != 4:
+            raise ValueError(f"半字节必须是4位，当前长度: {len(nibble)}")
+        
+        row = int(nibble[0:2], 2)
+        col = int(nibble[2:4], 2)
+        result = s_box[row][col]
+        
+        if self.debug:
+            print(f"半字节代替: {nibble} -> 行{row}列{col} -> {result:04b}")
+        
+        return format(result, '04b')
+    
+    def nibble_substitution_state(self, state, s_box):
+        """对整个状态进行半字节代替"""
+        new_state = state.copy()
+        for i in range(2):
+            for j in range(2):
+                nibble = format(state[i, j], '04b')
+                new_state[i, j] = int(self.nibble_substitution(nibble, s_box), 2)
+        return new_state
+    
+    def shift_rows(self, state):
+        """行移位"""
+        new_state = state.copy()
+        new_state[1, 0], new_state[1, 1] = new_state[1, 1], new_state[1, 0]
+        
+        if self.debug:
+            print("行移位:")
+            print(f"  前: {state[1, 0]:04b} {state[1, 1]:04b}")
+            print(f"  后: {new_state[1, 0]:04b} {new_state[1, 1]:04b}")
+        
+        return new_state
+    
+    def inverse_shift_rows(self, state):
+        """逆行移位"""
+        return self.shift_rows(state)
+    
+    def mix_columns(self, state):
+        """列混淆"""
+        new_state = np.zeros((2, 2), dtype=int)
+        
+        for col in range(2):
+            new_state[0, col] = self.gf_multiply(1, state[0, col]) ^ self.gf_multiply(4, state[1, col])
+            new_state[1, col] = self.gf_multiply(4, state[0, col]) ^ self.gf_multiply(1, state[1, col])
+        
+        if self.debug:
+            print("列混淆:")
+            print(f"  输入: {state[0, 0]:04b} {state[0, 1]:04b}")
+            print(f"        {state[1, 0]:04b} {state[1, 1]:04b}")
+            print(f"  输出: {new_state[0, 0]:04b} {new_state[0, 1]:04b}")
+            print(f"        {new_state[1, 0]:04b} {new_state[1, 1]:04b}")
+        
+        return new_state
+    
+    def inverse_mix_columns(self, state):
+        """逆列混淆"""
+        new_state = np.zeros((2, 2), dtype=int)
+        
+        for col in range(2):
+            new_state[0, col] = self.gf_multiply(9, state[0, col]) ^ self.gf_multiply(2, state[1, col])
+            new_state[1, col] = self.gf_multiply(2, state[0, col]) ^ self.gf_multiply(9, state[1, col])
+        
+        if self.debug:
+            print("逆列混淆:")
+            print(f"  输入: {state[0, 0]:04b} {state[0, 1]:04b}")
+            print(f"        {state[1, 0]:04b} {state[1, 1]:04b}")
+            print(f"  输出: {new_state[0, 0]:04b} {new_state[0, 1]:04b}")
+            print(f"        {new_state[1, 0]:04b} {new_state[1, 1]:04b}")
+        
+        return new_state
+    
+    def gf_multiply(self, a, b):
+        """GF(2^4)乘法 - 修复版本"""
+        if a == 0 or b == 0:
+            return 0
+        
+        # 使用多项式运算实现GF(2^4)乘法
+        # 模多项式: x^4 + x + 1 (0b10011)
+        product = 0
+        a_temp = a
+        
+        for i in range(4):
+            if b & 1:
+                product ^= a_temp
+            high_bit = a_temp & 0x8
+            a_temp <<= 1
+            if high_bit:
+                a_temp ^= 0x13  # x^4 + x + 1
+            a_temp &= 0xF  # 保持4位
+            b >>= 1
+        
+        return product
+    
+    def xor_binary(self, bin1, bin2):
+        """二进制字符串异或"""
+        result = ""
+        for b1, b2 in zip(bin1, bin2):
+            result += '1' if b1 != b2 else '0'
+        return result
+    
+    def add_round_key(self, state, round_key):
+        """轮密钥加"""
+        key_state = self.string_to_state(round_key)
+        new_state = state.copy()
+        
+        for i in range(2):
+            for j in range(2):
+                new_state[i, j] ^= key_state[i, j]
+        
+        if self.debug:
+            print(f"轮密钥加:")
+            print(f"  状态: {state[0, 0]:04b} {state[0, 1]:04b}")
+            print(f"        {state[1, 0]:04b} {state[1, 1]:04b}")
+            print(f"  密钥: {key_state[0, 0]:04b} {key_state[0, 1]:04b}")
+            print(f"        {key_state[1, 0]:04b} {key_state[1, 1]:04b}")
+            print(f"  结果: {new_state[0, 0]:04b} {new_state[0, 1]:04b}")
+            print(f"        {new_state[1, 0]:04b} {new_state[1, 1]:04b}")
+        
+        return new_state
+    
+    def encrypt(self, plaintext, key):
+        """加密函数"""
+        if self.debug:
+            print(f"\n{'='*50}")
+            print(f"开始加密")
+            print(f"明文: {plaintext}")
+            print(f"密钥: {key}")
+            print(f"{'='*50}")
+        
+        # 扩展密钥
+        round_keys = self.key_expansion(key)
+        
+        # 初始状态
+        state = self.string_to_state(plaintext)
+        
+        if self.debug:
+            print(f"\n--- 第0轮: 初始密钥加 ---")
+        
+        # 第0轮：密钥加
+        state = self.add_round_key(state, round_keys[0])
+        
+        if self.debug:
+            print(f"第0轮后状态: {self.state_to_string(state)}")
+        
+        # 第1轮
+        if self.debug:
+            print(f"\n--- 第1轮 ---")
+        
+        state = self.nibble_substitution_state(state, self.S_BOX)
+        if self.debug:
+            print(f"半字节代替后: {self.state_to_string(state)}")
+        
+        state = self.shift_rows(state)
+        if self.debug:
+            print(f"行移位后: {self.state_to_string(state)}")
+        
+        state = self.mix_columns(state)
+        if self.debug:
+            print(f"列混淆后: {self.state_to_string(state)}")
+        
+        state = self.add_round_key(state, round_keys[1])
+        if self.debug:
+            print(f"轮密钥加后: {self.state_to_string(state)}")
+        
+        # 第2轮
+        if self.debug:
+            print(f"\n--- 第2轮 ---")
+        
+        state = self.nibble_substitution_state(state, self.S_BOX)
+        if self.debug:
+            print(f"半字节代替后: {self.state_to_string(state)}")
+        
+        state = self.shift_rows(state)
+        if self.debug:
+            print(f"行移位后: {self.state_to_string(state)}")
+        
+        state = self.add_round_key(state, round_keys[2])
+        if self.debug:
+            print(f"轮密钥加后: {self.state_to_string(state)}")
+        
+        ciphertext = self.state_to_string(state)
+        
+        if self.debug:
+            print(f"\n加密完成!")
+            print(f"密文: {ciphertext}")
+            print(f"{'='*50}")
+        
+        return ciphertext
+    
+    def decrypt(self, ciphertext, key):
+        """解密函数"""
+        if self.debug:
+            print(f"\n{'='*50}")
+            print(f"开始解密")
+            print(f"密文: {ciphertext}")
+            print(f"密钥: {key}")
+            print(f"{'='*50}")
+        
+        # 扩展密钥
+        round_keys = self.key_expansion(key)
+        
+        # 初始状态
+        state = self.string_to_state(ciphertext)
+        
+        if self.debug:
+            print(f"\n--- 第2轮逆操作 ---")
+        
+        # 第2轮逆操作
+        state = self.add_round_key(state, round_keys[2])
+        if self.debug:
+            print(f"轮密钥加后: {self.state_to_string(state)}")
+        
+        state = self.inverse_shift_rows(state)
+        if self.debug:
+            print(f"逆行移位后: {self.state_to_string(state)}")
+        
+        state = self.nibble_substitution_state(state, self.INV_S_BOX)
+        if self.debug:
+            print(f"逆半字节代替后: {self.state_to_string(state)}")
+        
+        # 第1轮逆操作
+        if self.debug:
+            print(f"\n--- 第1轮逆操作 ---")
+        
+        state = self.add_round_key(state, round_keys[1])
+        if self.debug:
+            print(f"轮密钥加后: {self.state_to_string(state)}")
+        
+        state = self.inverse_mix_columns(state)
+        if self.debug:
+            print(f"逆列混淆后: {self.state_to_string(state)}")
+        
+        state = self.inverse_shift_rows(state)
+        if self.debug:
+            print(f"逆行移位后: {self.state_to_string(state)}")
+        
+        state = self.nibble_substitution_state(state, self.INV_S_BOX)
+        if self.debug:
+            print(f"逆半字节代替后: {self.state_to_string(state)}")
+        
+        # 第0轮逆操作
+        if self.debug:
+            print(f"\n--- 第0轮逆操作 ---")
+        
+        state = self.add_round_key(state, round_keys[0])
+        if self.debug:
+            print(f"轮密钥加后: {self.state_to_string(state)}")
+        
+        plaintext = self.state_to_string(state)
+        
+        if self.debug:
+            print(f"\n解密完成!")
+            print(f"明文: {plaintext}")
+            print(f"{'='*50}")
+        
+        return plaintext
+
+class DoubleSAES(DebugSAES):
+    """双重S-AES实现"""
+    
+    def double_encrypt(self, plaintext, key):
+        """双重加密"""
+        if len(key) != 32:
+            raise ValueError("双重加密密钥必须是32位")
+        
+        key1 = key[0:16]
+        key2 = key[16:32]
+        
+        # 先用key1加密，再用key2加密
+        intermediate = self.encrypt(plaintext, key1)
+        ciphertext = self.encrypt(intermediate, key2)
+        
+        return ciphertext
+    
+    def double_decrypt(self, ciphertext, key):
+        """双重解密"""
+        if len(key) != 32:
+            raise ValueError("双重解密密钥必须是32位")
+        
+        key1 = key[0:16]
+        key2 = key[16:32]
+        
+        # 先用key2解密，再用key1解密
+        intermediate = self.decrypt(ciphertext, key2)
+        plaintext = self.decrypt(intermediate, key1)
+        
+        return plaintext
+
+class TripleSAES(DebugSAES):
+    """三重S-AES实现"""
+    
+    def triple_encrypt_32bit(self, plaintext, key):
+        """32位密钥的三重加密 (K1+K2模式)"""
+        if len(key) != 32:
+            raise ValueError("三重加密密钥必须是32位")
+        
+        key1 = key[0:16]
+        key2 = key[16:32]
+        
+        # 加密-解密-加密模式
+        cipher1 = self.encrypt(plaintext, key1)
+        cipher2 = self.decrypt(cipher1, key2)
+        cipher3 = self.encrypt(cipher2, key1)
+        
+        return cipher3
+    
+    def triple_decrypt_32bit(self, ciphertext, key):
+        """32位密钥的三重解密"""
+        if len(key) != 32:
+            raise ValueError("三重解密密钥必须是32位")
+        
+        key1 = key[0:16]
+        key2 = key[16:32]
+        
+        # 解密-加密-解密模式
+        plain1 = self.decrypt(ciphertext, key1)
+        plain2 = self.encrypt(plain1, key2)
+        plain3 = self.decrypt(plain2, key1)
+        
+        return plain3
+    
+    def triple_encrypt_48bit(self, plaintext, key):
+        """48位密钥的三重加密 (K1+K2+K3模式)"""
+        if len(key) != 48:
+            raise ValueError("三重加密密钥必须是48位")
+        
+        key1 = key[0:16]
+        key2 = key[16:32]
+        key3 = key[32:48]
+        
+        # 加密-加密-加密模式
+        cipher1 = self.encrypt(plaintext, key1)
+        cipher2 = self.encrypt(cipher1, key2)
+        cipher3 = self.encrypt(cipher2, key3)
+        
+        return cipher3
+    
+    def triple_decrypt_48bit(self, ciphertext, key):
+        """48位密钥的三重解密"""
+        if len(key) != 48:
+            raise ValueError("三重解密密钥必须是48位")
+        
+        key1 = key[0:16]
+        key2 = key[16:32]
+        key3 = key[32:48]
+        
+        # 解密-解密-解密模式
+        plain1 = self.decrypt(ciphertext, key3)
+        plain2 = self.decrypt(plain1, key2)
+        plain3 = self.decrypt(plain2, key1)
+        
+        return plain3
+
+class MeetInTheMiddleAttack:
+    """中间相遇攻击实现"""
+    
+    def __init__(self, saes):
+        self.saes = saes
+    
+    def attack(self, plaintext, ciphertext, max_keys=1000):
+        """执行中间相遇攻击（限制密钥数量以减少计算时间）"""
+        # 存储所有可能的中间结果
+        encrypt_table = {}
+        
+        # 枚举部分可能的K1（为了演示，限制数量）
+        found_keys = []
+        tested = 0
+        
+        for k1 in range(min(65536, max_keys)):
+            key1 = format(k1, '016b')
+            intermediate = self.saes.encrypt(plaintext, key1)
+            encrypt_table[intermediate] = key1
+            tested += 1
+        
+        # 枚举部分可能的K2，查找匹配
+        for k2 in range(min(65536, max_keys)):
+            key2 = format(k2, '016b')
+            intermediate = self.saes.decrypt(ciphertext, key2)
+            if intermediate in encrypt_table:
+                key1 = encrypt_table[intermediate]
+                found_keys.append((key1, key2))
+        
+        return found_keys, tested
+
+class CBCMode:
+    """CBC工作模式实现"""
+    
+    def __init__(self, saes):
+        self.saes = saes
+    
+    def encrypt(self, plaintext_blocks, key, iv):
+        """CBC模式加密"""
+        ciphertext_blocks = []
+        prev_block = iv
+        
+        for block in plaintext_blocks:
+            # 与前一个密文块异或
+            xored_block = self.saes.xor_binary(block, prev_block)
+            # 加密
+            encrypted_block = self.saes.encrypt(xored_block, key)
+            ciphertext_blocks.append(encrypted_block)
+            prev_block = encrypted_block
+        
+        return ciphertext_blocks
+    
+    def decrypt(self, ciphertext_blocks, key, iv):
+        """CBC模式解密"""
+        plaintext_blocks = []
+        prev_block = iv
+        
+        for block in ciphertext_blocks:
+            # 解密
+            decrypted_block = self.saes.decrypt(block, key)
+            # 与前一个密文块异或
+            xored_block = self.saes.xor_binary(decrypted_block, prev_block)
+            plaintext_blocks.append(xored_block)
+            prev_block = block
+        
+        return plaintext_blocks
+
+class SAESApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("S-AES加密解密系统 - 修复版")
+        self.root.geometry("900x700")
+        
+        self.saes = DebugSAES()
+        self.double_saes = DoubleSAES()
+        self.triple_saes = TripleSAES()
+        self.mitm_attack = MeetInTheMiddleAttack(self.saes)
+        self.cbc_mode = CBCMode(self.saes)
+        
+        self.debug_output = scrolledtext.ScrolledText(self.root, height=15, width=100)
+        self.debug_output.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+        
+        self.setup_ui()
+        
+        # 重定向print到调试输出
+        import sys
+        sys.stdout = TextRedirector(self.debug_output, "stdout")
+    
+    def setup_ui(self):
+        """设置用户界面"""
+        # 创建选项卡
+        tab_control = ttk.Notebook(self.root)
+        
+        # 各个关卡选项卡
+        tab_basic = ttk.Frame(tab_control)
+        tab_ascii = ttk.Frame(tab_control)
+        tab_double = ttk.Frame(tab_control)
+        tab_triple = ttk.Frame(tab_control)
+        tab_mitm = ttk.Frame(tab_control)
+        tab_cbc = ttk.Frame(tab_control)
+        tab_test = ttk.Frame(tab_control)
+        
+        tab_control.add(tab_basic, text='第1关: 基本测试')
+        tab_control.add(tab_ascii, text='第3关: ASCII加密')
+        tab_control.add(tab_double, text='第4关: 双重加密')
+        tab_control.add(tab_triple, text='第4关: 三重加密')
+        tab_control.add(tab_mitm, text='第4关: 中间相遇攻击')
+        tab_control.add(tab_cbc, text='第5关: CBC模式')
+        tab_control.add(tab_test, text='正确性测试')
+        
+        tab_control.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+        
+        # 设置各个选项卡
+        self.setup_basic_tab(tab_basic)
+        self.setup_ascii_tab(tab_ascii)
+        self.setup_double_tab(tab_double)
+        self.setup_triple_tab(tab_triple)
+        self.setup_mitm_tab(tab_mitm)
+        self.setup_cbc_tab(tab_cbc)
+        self.setup_test_tab(tab_test)
+        
+        # 调试控制
+        debug_frame = ttk.Frame(self.root)
+        debug_frame.pack(padx=10, pady=5, fill=tk.X)
+        
+        ttk.Button(debug_frame, text="开启调试", command=self.enable_debug).pack(side=tk.LEFT, padx=5)
+        ttk.Button(debug_frame, text="关闭调试", command=self.disable_debug).pack(side=tk.LEFT, padx=5)
+        ttk.Button(debug_frame, text="清空输出", command=self.clear_output).pack(side=tk.LEFT, padx=5)
+    
+    def setup_basic_tab(self, parent):
+        """设置第1关: 基本测试界面"""
+        ttk.Label(parent, text="第1关: 基本S-AES加密解密", font=('Arial', 12, 'bold')).grid(row=0, column=0, columnspan=2, pady=10)
+        
+        # 明文输入
+        ttk.Label(parent, text="明文 (16位二进制):").grid(row=1, column=0, padx=5, pady=5, sticky='w')
+        self.plaintext_entry = ttk.Entry(parent, width=20)
+        self.plaintext_entry.grid(row=1, column=1, padx=5, pady=5)
+        
+        # 密钥输入
+        ttk.Label(parent, text="密钥 (16位二进制):").grid(row=2, column=0, padx=5, pady=5, sticky='w')
+        self.key_entry = ttk.Entry(parent, width=20)
+        self.key_entry.grid(row=2, column=1, padx=5, pady=5)
+        
+        # 按钮框架
+        button_frame = ttk.Frame(parent)
+        button_frame.grid(row=3, column=0, columnspan=2, pady=10)
+        
+        encrypt_btn = ttk.Button(button_frame, text="加密", command=self.encrypt_basic)
+        encrypt_btn.pack(side='left', padx=5)
+        
+        decrypt_btn = ttk.Button(button_frame, text="解密", command=self.decrypt_basic)
+        decrypt_btn.pack(side='left', padx=5)
+        
+        # 结果显示
+        result_frame = ttk.LabelFrame(parent, text="加密解密结果")
+        result_frame.grid(row=4, column=0, columnspan=2, padx=10, pady=10, sticky='we')
+        
+        ttk.Label(result_frame, text="密文:").grid(row=0, column=0, padx=5, pady=5, sticky='w')
+        self.ciphertext_label = ttk.Label(result_frame, text="", foreground='blue')
+        self.ciphertext_label.grid(row=0, column=1, padx=5, pady=5, sticky='w')
+        
+        ttk.Label(result_frame, text="解密结果:").grid(row=1, column=0, padx=5, pady=5, sticky='w')
+        self.decrypted_label = ttk.Label(result_frame, text="", foreground='green')
+        self.decrypted_label.grid(row=1, column=1, padx=5, pady=5, sticky='w')
+        
+        # 验证结果
+        ttk.Label(result_frame, text="验证:").grid(row=2, column=0, padx=5, pady=5, sticky='w')
+        self.verify_label = ttk.Label(result_frame, text="", foreground='red')
+        self.verify_label.grid(row=2, column=1, padx=5, pady=5, sticky='w')
+        
+        # 示例按钮
+        example_frame = ttk.Frame(parent)
+        example_frame.grid(row=5, column=0, columnspan=2, pady=10)
+        
+        example_btn = ttk.Button(example_frame, text="填充示例", command=self.fill_basic_example)
+        example_btn.pack(side='left', padx=5)
+    
+    def setup_ascii_tab(self, parent):
+        """设置第3关: ASCII加密界面"""
+        ttk.Label(parent, text="第3关: ASCII字符串加密", font=('Arial', 12, 'bold')).grid(row=0, column=0, columnspan=2, pady=10)
+        
+        ttk.Label(parent, text="ASCII文本:").grid(row=1, column=0, padx=5, pady=5, sticky='w')
+        self.ascii_text_entry = ttk.Entry(parent, width=30)
+        self.ascii_text_entry.grid(row=1, column=1, padx=5, pady=5)
+        
+        ttk.Label(parent, text="密钥 (16位二进制):").grid(row=2, column=0, padx=5, pady=5, sticky='w')
+        self.ascii_key_entry = ttk.Entry(parent, width=20)
+        self.ascii_key_entry.grid(row=2, column=1, padx=5, pady=5)
+        
+        # 按钮框架
+        button_frame = ttk.Frame(parent)
+        button_frame.grid(row=3, column=0, columnspan=2, pady=10)
+        
+        ascii_encrypt_btn = ttk.Button(button_frame, text="ASCII加密", command=self.encrypt_ascii)
+        ascii_encrypt_btn.pack(side='left', padx=5)
+        
+        ascii_decrypt_btn = ttk.Button(button_frame, text="ASCII解密", command=self.decrypt_ascii)
+        ascii_decrypt_btn.pack(side='left', padx=5)
+        
+        # 结果显示
+        result_frame = ttk.LabelFrame(parent, text="ASCII加密解密结果")
+        result_frame.grid(row=4, column=0, columnspan=2, padx=10, pady=10, sticky='we')
+        
+        ttk.Label(result_frame, text="加密结果:").grid(row=0, column=0, padx=5, pady=5, sticky='w')
+        self.ascii_encrypted_label = ttk.Label(result_frame, text="", foreground='blue', wraplength=400)
+        self.ascii_encrypted_label.grid(row=0, column=1, padx=5, pady=5, sticky='w')
+        
+        ttk.Label(result_frame, text="解密结果:").grid(row=1, column=0, padx=5, pady=5, sticky='w')
+        self.ascii_decrypted_label = ttk.Label(result_frame, text="", foreground='green', wraplength=400)
+        self.ascii_decrypted_label.grid(row=1, column=1, padx=5, pady=5, sticky='w')
+        
+        # 验证结果
+        ttk.Label(result_frame, text="验证:").grid(row=2, column=0, padx=5, pady=5, sticky='w')
+        self.ascii_verify_label = ttk.Label(result_frame, text="", foreground='red')
+        self.ascii_verify_label.grid(row=2, column=1, padx=5, pady=5, sticky='w')
+        
+        # 示例按钮
+        example_btn = ttk.Button(parent, text="填充示例", command=self.fill_ascii_example)
+        example_btn.grid(row=5, column=0, columnspan=2, pady=5)
+    
+    def setup_double_tab(self, parent):
+        """设置第4关: 双重加密界面"""
+        ttk.Label(parent, text="第4关: 双重加密 (32位密钥)", font=('Arial', 12, 'bold')).grid(row=0, column=0, columnspan=2, pady=10)
+        
+        ttk.Label(parent, text="明文 (16位二进制):").grid(row=1, column=0, padx=5, pady=5, sticky='w')
+        self.double_plaintext_entry = ttk.Entry(parent, width=20)
+        self.double_plaintext_entry.grid(row=1, column=1, padx=5, pady=5)
+        
+        ttk.Label(parent, text="密钥 (32位二进制):").grid(row=2, column=0, padx=5, pady=5, sticky='w')
+        self.double_key_entry = ttk.Entry(parent, width=35)
+        self.double_key_entry.grid(row=2, column=1, padx=5, pady=5)
+        
+        # 按钮框架
+        button_frame = ttk.Frame(parent)
+        button_frame.grid(row=3, column=0, columnspan=2, pady=10)
+        
+        double_encrypt_btn = ttk.Button(button_frame, text="双重加密", command=self.encrypt_double)
+        double_encrypt_btn.pack(side='left', padx=5)
+        
+        double_decrypt_btn = ttk.Button(button_frame, text="双重解密", command=self.decrypt_double)
+        double_decrypt_btn.pack(side='left', padx=5)
+        
+        # 结果显示
+        result_frame = ttk.LabelFrame(parent, text="双重加密解密结果")
+        result_frame.grid(row=4, column=0, columnspan=2, padx=10, pady=10, sticky='we')
+        
+        ttk.Label(result_frame, text="双重加密结果:").grid(row=0, column=0, padx=5, pady=5, sticky='w')
+        self.double_encrypted_label = ttk.Label(result_frame, text="", foreground='blue')
+        self.double_encrypted_label.grid(row=0, column=1, padx=5, pady=5, sticky='w')
+        
+        ttk.Label(result_frame, text="双重解密结果:").grid(row=1, column=0, padx=5, pady=5, sticky='w')
+        self.double_decrypted_label = ttk.Label(result_frame, text="", foreground='green')
+        self.double_decrypted_label.grid(row=1, column=1, padx=5, pady=5, sticky='w')
+        
+        # 验证结果
+        ttk.Label(result_frame, text="验证:").grid(row=2, column=0, padx=5, pady=5, sticky='w')
+        self.double_verify_label = ttk.Label(result_frame, text="", foreground='red')
+        self.double_verify_label.grid(row=2, column=1, padx=5, pady=5, sticky='w')
+        
+        # 示例按钮
+        example_btn = ttk.Button(parent, text="填充示例", command=self.fill_double_example)
+        example_btn.grid(row=5, column=0, columnspan=2, pady=5)
+    
+    def setup_triple_tab(self, parent):
+        """设置第4关: 三重加密界面"""
+        ttk.Label(parent, text="第4关: 三重加密", font=('Arial', 12, 'bold')).grid(row=0, column=0, columnspan=2, pady=10)
+        
+        # 模式选择
+        ttk.Label(parent, text="加密模式:").grid(row=1, column=0, padx=5, pady=5, sticky='w')
+        self.triple_mode = tk.StringVar(value="32bit")
+        ttk.Radiobutton(parent, text="32位密钥 (K1+K2)", variable=self.triple_mode, value="32bit").grid(row=1, column=1, sticky='w')
+        ttk.Radiobutton(parent, text="48位密钥 (K1+K2+K3)", variable=self.triple_mode, value="48bit").grid(row=2, column=1, sticky='w')
+        
+        ttk.Label(parent, text="明文 (16位二进制):").grid(row=3, column=0, padx=5, pady=5, sticky='w')
+        self.triple_plaintext_entry = ttk.Entry(parent, width=20)
+        self.triple_plaintext_entry.grid(row=3, column=1, padx=5, pady=5)
+        
+        ttk.Label(parent, text="密钥:").grid(row=4, column=0, padx=5, pady=5, sticky='w')
+        self.triple_key_entry = ttk.Entry(parent, width=50)
+        self.triple_key_entry.grid(row=4, column=1, padx=5, pady=5)
+        
+        # 按钮框架
+        button_frame = ttk.Frame(parent)
+        button_frame.grid(row=5, column=0, columnspan=2, pady=10)
+        
+        triple_encrypt_btn = ttk.Button(button_frame, text="三重加密", command=self.encrypt_triple)
+        triple_encrypt_btn.pack(side='left', padx=5)
+        
+        triple_decrypt_btn = ttk.Button(button_frame, text="三重解密", command=self.decrypt_triple)
+        triple_decrypt_btn.pack(side='left', padx=5)
+        
+        # 结果显示
+        result_frame = ttk.LabelFrame(parent, text="三重加密解密结果")
+        result_frame.grid(row=6, column=0, columnspan=2, padx=10, pady=10, sticky='we')
+        
+        ttk.Label(result_frame, text="三重加密结果:").grid(row=0, column=0, padx=5, pady=5, sticky='w')
+        self.triple_encrypted_label = ttk.Label(result_frame, text="", foreground='blue')
+        self.triple_encrypted_label.grid(row=0, column=1, padx=5, pady=5, sticky='w')
+        
+        ttk.Label(result_frame, text="三重解密结果:").grid(row=1, column=0, padx=5, pady=5, sticky='w')
+        self.triple_decrypted_label = ttk.Label(result_frame, text="", foreground='green')
+        self.triple_decrypted_label.grid(row=1, column=1, padx=5, pady=5, sticky='w')
+        
+        # 验证结果
+        ttk.Label(result_frame, text="验证:").grid(row=2, column=0, padx=5, pady=5, sticky='w')
+        self.triple_verify_label = ttk.Label(result_frame, text="", foreground='red')
+        self.triple_verify_label.grid(row=2, column=1, padx=5, pady=5, sticky='w')
+        
+        # 示例按钮
+        example_btn = ttk.Button(parent, text="填充示例", command=self.fill_triple_example)
+        example_btn.grid(row=7, column=0, columnspan=2, pady=5)
+    
+    def setup_mitm_tab(self, parent):
+        """设置第4关: 中间相遇攻击界面"""
+        ttk.Label(parent, text="第4关: 中间相遇攻击", font=('Arial', 12, 'bold')).grid(row=0, column=0, columnspan=2, pady=10)
+        
+        ttk.Label(parent, text="已知明文 (16位二进制):").grid(row=1, column=0, padx=5, pady=5, sticky='w')
+        self.mitm_plaintext_entry = ttk.Entry(parent, width=20)
+        self.mitm_plaintext_entry.grid(row=1, column=1, padx=5, pady=5)
+        
+        ttk.Label(parent, text="已知密文 (16位二进制):").grid(row=2, column=0, padx=5, pady=5, sticky='w')
+        self.mitm_ciphertext_entry = ttk.Entry(parent, width=20)
+        self.mitm_ciphertext_entry.grid(row=2, column=1, padx=5, pady=5)
+        
+        ttk.Label(parent, text="最大测试密钥数:").grid(row=3, column=0, padx=5, pady=5, sticky='w')
+        self.mitm_max_keys = tk.StringVar(value="1000")
+        ttk.Entry(parent, textvariable=self.mitm_max_keys, width=10).grid(row=3, column=1, padx=5, pady=5, sticky='w')
+        
+        # 攻击按钮
+        mitm_btn = ttk.Button(parent, text="执行中间相遇攻击", command=self.perform_mitm_attack)
+        mitm_btn.grid(row=4, column=0, columnspan=2, pady=10)
+        
+        # 结果显示
+        result_frame = ttk.LabelFrame(parent, text="中间相遇攻击结果")
+        result_frame.grid(row=5, column=0, columnspan=2, padx=10, pady=10, sticky='we')
+        
+        # 使用滚动文本框显示结果
+        self.mitm_result_text = scrolledtext.ScrolledText(result_frame, width=60, height=8)
+        self.mitm_result_text.grid(row=0, column=0, padx=5, pady=5, sticky='we')
+        
+        # 状态标签
+        self.mitm_status_label = ttk.Label(parent, text="")
+        self.mitm_status_label.grid(row=6, column=0, columnspan=2, pady=5)
+        
+        # 示例按钮
+        example_btn = ttk.Button(parent, text="填充示例", command=self.fill_mitm_example)
+        example_btn.grid(row=7, column=0, columnspan=2, pady=5)
+    
+    def setup_cbc_tab(self, parent):
+        """设置第5关: CBC模式界面"""
+        ttk.Label(parent, text="第5关: CBC工作模式", font=('Arial', 12, 'bold')).grid(row=0, column=0, columnspan=2, pady=10)
+        
+        ttk.Label(parent, text="明文 (多个16位分组，用空格分隔):").grid(row=1, column=0, padx=5, pady=5, sticky='w')
+        self.cbc_plaintext_entry = ttk.Entry(parent, width=50)
+        self.cbc_plaintext_entry.grid(row=1, column=1, padx=5, pady=5)
+        
+        ttk.Label(parent, text="密钥 (16位二进制):").grid(row=2, column=0, padx=5, pady=5, sticky='w')
+        self.cbc_key_entry = ttk.Entry(parent, width=20)
+        self.cbc_key_entry.grid(row=2, column=1, padx=5, pady=5)
+        
+        ttk.Label(parent, text="初始向量IV (16位二进制):").grid(row=3, column=0, padx=5, pady=5, sticky='w')
+        self.cbc_iv_entry = ttk.Entry(parent, width=20)
+        self.cbc_iv_entry.grid(row=3, column=1, padx=5, pady=5)
+        
+        # 按钮框架
+        button_frame = ttk.Frame(parent)
+        button_frame.grid(row=4, column=0, columnspan=2, pady=10)
+        
+        cbc_encrypt_btn = ttk.Button(button_frame, text="CBC加密", command=self.encrypt_cbc)
+        cbc_encrypt_btn.pack(side='left', padx=5)
+        
+        cbc_decrypt_btn = ttk.Button(button_frame, text="CBC解密", command=self.decrypt_cbc)
+        cbc_decrypt_btn.pack(side='left', padx=5)
+        
+        tamper_btn = ttk.Button(button_frame, text="篡改测试", command=self.tamper_test)
+        tamper_btn.pack(side='left', padx=5)
+        
+        # 结果显示
+        result_frame = ttk.LabelFrame(parent, text="CBC模式结果")
+        result_frame.grid(row=5, column=0, columnspan=2, padx=10, pady=10, sticky='we')
+        
+        ttk.Label(result_frame, text="加密结果:").grid(row=0, column=0, padx=5, pady=5, sticky='w')
+        self.cbc_encrypted_label = ttk.Label(result_frame, text="", foreground='blue', wraplength=500)
+        self.cbc_encrypted_label.grid(row=0, column=1, padx=5, pady=5, sticky='w')
+        
+        ttk.Label(result_frame, text="解密结果:").grid(row=1, column=0, padx=5, pady=5, sticky='w')
+        self.cbc_decrypted_label = ttk.Label(result_frame, text="", foreground='green', wraplength=500)
+        self.cbc_decrypted_label.grid(row=1, column=1, padx=5, pady=5, sticky='w')
+        
+        ttk.Label(result_frame, text="篡改后解密:").grid(row=2, column=0, padx=5, pady=5, sticky='w')
+        self.cbc_tampered_label = ttk.Label(result_frame, text="", foreground='red', wraplength=500)
+        self.cbc_tampered_label.grid(row=2, column=1, padx=5, pady=5, sticky='w')
+        
+        # 示例按钮
+        example_btn = ttk.Button(parent, text="填充示例", command=self.fill_cbc_example)
+        example_btn.grid(row=6, column=0, columnspan=2, pady=5)
+    
+    def setup_test_tab(self, parent):
+        """设置正确性测试界面"""
+        ttk.Label(parent, text="S-AES正确性测试", font=('Arial', 12, 'bold')).grid(row=0, column=0, columnspan=2, pady=10)
+        
+        # 测试按钮
+        test_frame = ttk.Frame(parent)
+        test_frame.grid(row=1, column=0, columnspan=2, pady=10)
+        
+        ttk.Button(test_frame, text="运行标准测试", command=self.run_standard_tests).pack(side='left', padx=5)
+        ttk.Button(test_frame, text="验证S盒", command=self.verify_sbox).pack(side='left', padx=5)
+        ttk.Button(test_frame, text="验证列混淆", command=self.verify_mix_columns).pack(side='left', padx=5)
+        ttk.Button(test_frame, text="交叉测试验证", command=self.cross_test).pack(side='left', padx=5)
+        
+        # 测试结果显示
+        self.test_result_text = scrolledtext.ScrolledText(parent, width=80, height=15)
+        self.test_result_text.grid(row=2, column=0, columnspan=2, padx=10, pady=10, sticky='we')
+    
+    # 第1关: 基本测试功能
+    def encrypt_basic(self):
+        """基本加密"""
+        try:
+            plaintext = self.plaintext_entry.get()
+            key = self.key_entry.get()
+            
+            if len(plaintext) != 16 or len(key) != 16:
+                messagebox.showerror("错误", "明文和密钥都必须是16位二进制")
+                return
+            
+            print(f"\n=== 基本加密测试 ===")
+            print(f"明文: {plaintext}")
+            print(f"密钥: {key}")
+            
+            ciphertext = self.saes.encrypt(plaintext, key)
+            self.ciphertext_label.config(text=ciphertext)
+            
+            print(f"密文: {ciphertext}")
+            
+        except Exception as e:
+            messagebox.showerror("错误", f"加密失败: {str(e)}")
+            print(f"加密错误: {str(e)}")
+    
+    def decrypt_basic(self):
+        """基本解密"""
+        try:
+            ciphertext = self.ciphertext_label.cget("text")
+            key = self.key_entry.get()
+            
+            if not ciphertext or len(key) != 16:
+                messagebox.showerror("错误", "请先加密或检查密钥长度")
+                return
+            
+            print(f"\n=== 基本解密测试 ===")
+            print(f"密文: {ciphertext}")
+            print(f"密钥: {key}")
+            
+            plaintext = self.saes.decrypt(ciphertext, key)
+            self.decrypted_label.config(text=plaintext)
+            
+            original = self.plaintext_entry.get()
+            if plaintext == original:
+                self.verify_label.config(text="✓ 解密成功", foreground="green")
+                print(f"解密成功: {plaintext}")
+            else:
+                self.verify_label.config(text="✗ 解密失败", foreground="red")
+                print(f"解密失败: 期望 {original}, 得到 {plaintext}")
+            
+        except Exception as e:
+            messagebox.showerror("错误", f"解密失败: {str(e)}")
+            print(f"解密错误: {str(e)}")
+    
+    # 第3关: ASCII加密功能
+    def encrypt_ascii(self):
+        """ASCII加密"""
+        try:
+            text = self.ascii_text_entry.get()
+            key = self.ascii_key_entry.get()
+            
+            if not text or len(key) != 16:
+                messagebox.showerror("错误", "请输入文本和16位密钥")
+                return
+            
+            print(f"\n=== ASCII加密测试 ===")
+            print(f"文本: '{text}'")
+            print(f"密钥: {key}")
+            
+            # 将文本转换为二进制并分组
+            binary_text = self.saes.text_to_binary(text)
+            print(f"二进制: {binary_text}")
+            
+            # 分组加密（每组16位）
+            encrypted_binary = ""
+            for i in range(0, len(binary_text), 16):
+                block = binary_text[i:i+16]
+                if len(block) < 16:
+                    block = block.ljust(16, '0')  # 填充
+                print(f"加密块 {i//16}: {block}")
+                encrypted_block = self.saes.encrypt(block, key)
+                encrypted_binary += encrypted_block
+                print(f"加密后: {encrypted_block}")
+            
+            # 转换为ASCII字符串（可能是乱码）
+            encrypted_text = self.saes.binary_to_text(encrypted_binary)
+            self.ascii_encrypted_label.config(text=encrypted_text)
+            
+            print(f"加密结果: '{encrypted_text}'")
+            print(f"加密二进制: {encrypted_binary}")
+            
+        except Exception as e:
+            messagebox.showerror("错误", f"ASCII加密失败: {str(e)}")
+            print(f"ASCII加密错误: {str(e)}")
+    
+    def decrypt_ascii(self):
+        """ASCII解密"""
+        try:
+            encrypted_text = self.ascii_encrypted_label.cget("text")
+            key = self.ascii_key_entry.get()
+            
+            if not encrypted_text or len(key) != 16:
+                messagebox.showerror("错误", "请先加密或检查密钥长度")
+                return
+            
+            print(f"\n=== ASCII解密测试 ===")
+            print(f"加密文本: '{encrypted_text}'")
+            print(f"密钥: {key}")
+            
+            # 将加密文本转换为二进制
+            encrypted_binary = self.saes.text_to_binary(encrypted_text)
+            print(f"加密二进制: {encrypted_binary}")
+            
+            # 分组解密
+            decrypted_binary = ""
+            for i in range(0, len(encrypted_binary), 16):
+                block = encrypted_binary[i:i+16]
+                print(f"解密块 {i//16}: {block}")
+                decrypted_block = self.saes.decrypt(block, key)
+                decrypted_binary += decrypted_block
+                print(f"解密后: {decrypted_block}")
+            
+            # 转换为文本
+            decrypted_text = self.saes.binary_to_text(decrypted_binary)
+            self.ascii_decrypted_label.config(text=decrypted_text)
+            
+            original = self.ascii_text_entry.get()
+            if decrypted_text == original:
+                self.ascii_verify_label.config(text="✓ 解密成功", foreground="green")
+                print(f"解密成功: '{decrypted_text}'")
+            else:
+                self.ascii_verify_label.config(text="✗ 解密失败", foreground="red")
+                print(f"解密失败: 期望 '{original}', 得到 '{decrypted_text}'")
+            
+        except Exception as e:
+            messagebox.showerror("错误", f"ASCII解密失败: {str(e)}")
+            print(f"ASCII解密错误: {str(e)}")
+    
+    # 第4关: 双重加密功能
+    def encrypt_double(self):
+        """双重加密"""
+        try:
+            plaintext = self.double_plaintext_entry.get()
+            key = self.double_key_entry.get()
+            
+            if len(plaintext) != 16 or len(key) != 32:
+                messagebox.showerror("错误", "明文必须是16位，密钥必须是32位二进制")
+                return
+            
+            print(f"\n=== 双重加密测试 ===")
+            print(f"明文: {plaintext}")
+            print(f"密钥: {key}")
+            print(f"K1: {key[0:16]}")
+            print(f"K2: {key[16:32]}")
+            
+            ciphertext = self.double_saes.double_encrypt(plaintext, key)
+            self.double_encrypted_label.config(text=ciphertext)
+            
+            print(f"双重加密结果: {ciphertext}")
+            
+        except Exception as e:
+            messagebox.showerror("错误", f"双重加密失败: {str(e)}")
+            print(f"双重加密错误: {str(e)}")
+    
+    def decrypt_double(self):
+        """双重解密"""
+        try:
+            ciphertext = self.double_encrypted_label.cget("text")
+            key = self.double_key_entry.get()
+            
+            if not ciphertext or len(key) != 32:
+                messagebox.showerror("错误", "请先加密或检查密钥长度")
+                return
+            
+            print(f"\n=== 双重解密测试 ===")
+            print(f"密文: {ciphertext}")
+            print(f"密钥: {key}")
+            
+            plaintext = self.double_saes.double_decrypt(ciphertext, key)
+            self.double_decrypted_label.config(text=plaintext)
+            
+            original = self.double_plaintext_entry.get()
+            if plaintext == original:
+                self.double_verify_label.config(text="✓ 解密成功", foreground="green")
+                print(f"双重解密成功: {plaintext}")
+            else:
+                self.double_verify_label.config(text="✗ 解密失败", foreground="red")
+                print(f"双重解密失败: 期望 {original}, 得到 {plaintext}")
+            
+        except Exception as e:
+            messagebox.showerror("错误", f"双重解密失败: {str(e)}")
+            print(f"双重解密错误: {str(e)}")
+    
+    # 第4关: 三重加密功能
+    def encrypt_triple(self):
+        """三重加密"""
+        try:
+            plaintext = self.triple_plaintext_entry.get()
+            key = self.triple_key_entry.get()
+            mode = self.triple_mode.get()
+            
+            if len(plaintext) != 16:
+                messagebox.showerror("错误", "明文必须是16位二进制")
+                return
+            
+            print(f"\n=== 三重加密测试 ===")
+            print(f"明文: {plaintext}")
+            print(f"模式: {mode}")
+            print(f"密钥: {key}")
+            
+            if mode == "32bit":
+                if len(key) != 32:
+                    messagebox.showerror("错误", "32位模式密钥必须是32位二进制")
+                    return
+                ciphertext = self.triple_saes.triple_encrypt_32bit(plaintext, key)
+                print(f"K1: {key[0:16]}")
+                print(f"K2: {key[16:32]}")
+            else:  # 48bit
+                if len(key) != 48:
+                    messagebox.showerror("错误", "48位模式密钥必须是48位二进制")
+                    return
+                ciphertext = self.triple_saes.triple_encrypt_48bit(plaintext, key)
+                print(f"K1: {key[0:16]}")
+                print(f"K2: {key[16:32]}")
+                print(f"K3: {key[32:48]}")
+            
+            self.triple_encrypted_label.config(text=ciphertext)
+            print(f"三重加密结果: {ciphertext}")
+            
+        except Exception as e:
+            messagebox.showerror("错误", f"三重加密失败: {str(e)}")
+            print(f"三重加密错误: {str(e)}")
+    
+    def decrypt_triple(self):
+        """三重解密"""
+        try:
+            ciphertext = self.triple_encrypted_label.cget("text")
+            key = self.triple_key_entry.get()
+            mode = self.triple_mode.get()
+            
+            if not ciphertext:
+                messagebox.showerror("错误", "请先加密")
+                return
+            
+            print(f"\n=== 三重解密测试 ===")
+            print(f"密文: {ciphertext}")
+            print(f"模式: {mode}")
+            print(f"密钥: {key}")
+            
+            if mode == "32bit":
+                if len(key) != 32:
+                    messagebox.showerror("错误", "32位模式密钥必须是32位二进制")
+                    return
+                plaintext = self.triple_saes.triple_decrypt_32bit(ciphertext, key)
+            else:  # 48bit
+                if len(key) != 48:
+                    messagebox.showerror("错误", "48位模式密钥必须是48位二进制")
+                    return
+                plaintext = self.triple_saes.triple_decrypt_48bit(ciphertext, key)
+            
+            self.triple_decrypted_label.config(text=plaintext)
+            
+            original = self.triple_plaintext_entry.get()
+            if plaintext == original:
+                self.triple_verify_label.config(text="✓ 解密成功", foreground="green")
+                print(f"三重解密成功: {plaintext}")
+            else:
+                self.triple_verify_label.config(text="✗ 解密失败", foreground="red")
+                print(f"三重解密失败: 期望 {original}, 得到 {plaintext}")
+            
+        except Exception as e:
+            messagebox.showerror("错误", f"三重解密失败: {str(e)}")
+            print(f"三重解密错误: {str(e)}")
+    
+    # 第4关: 中间相遇攻击
+    def perform_mitm_attack(self):
+        """执行中间相遇攻击"""
+        try:
+            plaintext = self.mitm_plaintext_entry.get()
+            ciphertext = self.mitm_ciphertext_entry.get()
+            max_keys = int(self.mitm_max_keys.get())
+            
+            if len(plaintext) != 16 or len(ciphertext) != 16:
+                messagebox.showerror("错误", "明文和密文都必须是16位二进制")
+                return
+            
+            self.mitm_status_label.config(text="正在执行中间相遇攻击，请稍候...")
+            self.mitm_result_text.delete(1.0, tk.END)
+            self.root.update()
+            
+            print(f"\n=== 中间相遇攻击 ===")
+            print(f"已知明文: {plaintext}")
+            print(f"已知密文: {ciphertext}")
+            print(f"最大测试密钥数: {max_keys}")
+            
+            # 执行攻击
+            found_keys, tested = self.mitm_attack.attack(plaintext, ciphertext, max_keys)
+            
+            # 显示结果
+            self.mitm_result_text.insert(tk.END, f"测试了 {tested} 个密钥\n")
+            self.mitm_result_text.insert(tk.END, f"找到 {len(found_keys)} 个可能的密钥对:\n\n")
+            
+            if found_keys:
+                for i, (k1, k2) in enumerate(found_keys[:10]):  # 只显示前10个
+                    self.mitm_result_text.insert(tk.END, f"密钥对 {i+1}:\n")
+                    self.mitm_result_text.insert(tk.END, f"  K1: {k1}\n")
+                    self.mitm_result_text.insert(tk.END, f"  K2: {k2}\n")
+                    self.mitm_result_text.insert(tk.END, f"  完整密钥: {k1 + k2}\n\n")
+                
+                if len(found_keys) > 10:
+                    self.mitm_result_text.insert(tk.END, f"... 还有 {len(found_keys) - 10} 个密钥对未显示\n")
+                
+                self.mitm_status_label.config(text=f"攻击完成！找到 {len(found_keys)} 个可能的密钥对")
+                print(f"攻击完成！找到 {len(found_keys)} 个可能的密钥对")
+            else:
+                self.mitm_result_text.insert(tk.END, "未找到匹配的密钥对")
+                self.mitm_status_label.config(text="攻击完成！未找到匹配的密钥对")
+                print("攻击完成！未找到匹配的密钥对")
+                
+        except Exception as e:
+            messagebox.showerror("错误", f"中间相遇攻击失败: {str(e)}")
+            self.mitm_status_label.config(text="攻击失败")
+            print(f"中间相遇攻击错误: {str(e)}")
+    
+    # 第5关: CBC模式
+    def encrypt_cbc(self):
+        """CBC加密"""
+        try:
+            plaintext_blocks = self.cbc_plaintext_entry.get().split()
+            key = self.cbc_key_entry.get()
+            iv = self.cbc_iv_entry.get()
+            
+            if not plaintext_blocks:
+                messagebox.showerror("错误", "请输入明文分组")
+                return
+            
+            if len(key) != 16 or len(iv) != 16:
+                messagebox.showerror("错误", "密钥和IV都必须是16位二进制")
+                return
+            
+            # 检查所有分组都是16位
+            for block in plaintext_blocks:
+                if len(block) != 16:
+                    messagebox.showerror("错误", f"分组 '{block}' 不是16位")
+                    return
+            
+            print(f"\n=== CBC模式加密 ===")
+            print(f"明文分组: {plaintext_blocks}")
+            print(f"密钥: {key}")
+            print(f"IV: {iv}")
+            
+            # CBC加密
+            ciphertext_blocks = self.cbc_mode.encrypt(plaintext_blocks, key, iv)
+            
+            # 显示结果
+            self.cbc_encrypted_label.config(text=" ".join(ciphertext_blocks))
+            print(f"加密结果: {ciphertext_blocks}")
+            
+        except Exception as e:
+            messagebox.showerror("错误", f"CBC加密失败: {str(e)}")
+            print(f"CBC加密错误: {str(e)}")
+    
+    def decrypt_cbc(self):
+        """CBC解密"""
+        try:
+            ciphertext_blocks = self.cbc_encrypted_label.cget("text").split()
+            key = self.cbc_key_entry.get()
+            iv = self.cbc_iv_entry.get()
+            
+            if not ciphertext_blocks:
+                messagebox.showerror("错误", "请先加密")
+                return
+            
+            if len(key) != 16 or len(iv) != 16:
+                messagebox.showerror("错误", "密钥和IV都必须是16位二进制")
+                return
+            
+            print(f"\n=== CBC模式解密 ===")
+            print(f"密文分组: {ciphertext_blocks}")
+            print(f"密钥: {key}")
+            print(f"IV: {iv}")
+            
+            # CBC解密
+            plaintext_blocks = self.cbc_mode.decrypt(ciphertext_blocks, key, iv)
+            
+            # 显示结果
+            self.cbc_decrypted_label.config(text=" ".join(plaintext_blocks))
+            self.cbc_tampered_label.config(text="")  # 清空篡改结果
+            print(f"解密结果: {plaintext_blocks}")
+            
+        except Exception as e:
+            messagebox.showerror("错误", f"CBC解密失败: {str(e)}")
+            print(f"CBC解密错误: {str(e)}")
+    
+    def tamper_test(self):
+        """篡改测试"""
+        try:
+            ciphertext_blocks = self.cbc_encrypted_label.cget("text").split()
+            key = self.cbc_key_entry.get()
+            iv = self.cbc_iv_entry.get()
+            
+            if not ciphertext_blocks:
+                messagebox.showerror("错误", "请先加密")
+                return
+            
+            if len(key) != 16 or len(iv) != 16:
+                messagebox.showerror("错误", "密钥和IV都必须是16位二进制")
+                return
+            
+            print(f"\n=== CBC篡改测试 ===")
+            print(f"原始密文: {ciphertext_blocks}")
+            
+            # 随机篡改一个密文分组
+            tampered_blocks = ciphertext_blocks.copy()
+            if len(tampered_blocks) > 1:
+                # 篡改中间的一个分组
+                tamper_index = len(tampered_blocks) // 2
+                original_block = tampered_blocks[tamper_index]
+                # 随机翻转一些位
+                tampered_block = ''.join('1' if bit == '0' else '0' for bit in original_block[:8]) + original_block[8:]
+                tampered_blocks[tamper_index] = tampered_block
+                
+                print(f"篡改第 {tamper_index + 1} 个分组:")
+                print(f"  原分组: {original_block}")
+                print(f"  篡改后: {tampered_block}")
+                
+                # 解密被篡改的密文
+                tampered_plaintext = self.cbc_mode.decrypt(tampered_blocks, key, iv)
+                
+                # 显示结果
+                self.cbc_tampered_label.config(text=" ".join(tampered_plaintext))
+                print(f"篡改后解密: {tampered_plaintext}")
+                
+                # 显示篡改信息
+                messagebox.showinfo("篡改测试", 
+                    f"已篡改第 {tamper_index + 1} 个密文分组:\n"
+                    f"原分组: {original_block}\n"
+                    f"篡改后: {tampered_block}\n\n"
+                    f"注意: 篡改会影响后续所有分组的解密结果")
+            else:
+                messagebox.showwarning("篡改测试", "需要至少2个分组才能进行篡改测试")
+                
+        except Exception as e:
+            messagebox.showerror("错误", f"篡改测试失败: {str(e)}")
+            print(f"篡改测试错误: {str(e)}")
+    
+    # 正确性测试功能
+    def run_standard_tests(self):
+        """运行标准测试"""
+        self.test_result_text.delete(1.0, tk.END)
+        
+        test_cases = [
+            {
+                "name": "标准测试1",
+                "plaintext": "0110111101101011",
+                "key": "1010011100111011",
+                "expected_ciphertext": "0000011100111000"
+            },
+            {
+                "name": "全零测试", 
+                "plaintext": "0000000000000000",
+                "key": "0000000000000000",
+                "expected_ciphertext": "1100101000000011"
+            },
+            {
+                "name": "全一测试",
+                "plaintext": "1111111111111111", 
+                "key": "1111111111111111",
+                "expected_ciphertext": "0011000100101110"
+            }
+        ]
+        
+        self.test_result_text.insert(tk.END, "开始S-AES正确性测试...\n\n")
+        
+        all_passed = True
+        for test in test_cases:
+            self.test_result_text.insert(tk.END, f"测试: {test['name']}\n")
+            self.test_result_text.insert(tk.END, f"明文: {test['plaintext']}\n")
+            self.test_result_text.insert(tk.END, f"密钥: {test['key']}\n")
+            
+            # 加密
+            ciphertext = self.saes.encrypt(test['plaintext'], test['key'])
+            self.test_result_text.insert(tk.END, f"加密结果: {ciphertext}\n")
+            self.test_result_text.insert(tk.END, f"预期结果: {test['expected_ciphertext']}\n")
+            
+            encrypt_ok = ciphertext == test['expected_ciphertext']
+            self.test_result_text.insert(tk.END, f"加密: {'✓' if encrypt_ok else '✗'}\n")
+            
+            # 解密
+            decrypted = self.saes.decrypt(ciphertext, test['key'])
+            self.test_result_text.insert(tk.END, f"解密结果: {decrypted}\n")
+            
+            decrypt_ok = decrypted == test['plaintext']
+            self.test_result_text.insert(tk.END, f"解密: {'✓' if decrypt_ok else '✗'}\n")
+            
+            if encrypt_ok and decrypt_ok:
+                self.test_result_text.insert(tk.END, "✓ 测试通过\n\n")
+            else:
+                self.test_result_text.insert(tk.END, "✗ 测试失败\n\n")
+                all_passed = False
+        
+        if all_passed:
+            self.test_result_text.insert(tk.END, "🎉 所有测试用例通过！\n")
+        else:
+            self.test_result_text.insert(tk.END, "❌ 部分测试用例失败\n")
+    
+    def verify_sbox(self):
+        """验证S盒"""
+        self.test_result_text.delete(1.0, tk.END)
+        self.test_result_text.insert(tk.END, "开始验证S盒和逆S盒...\n\n")
+        
+        all_ok = True
+        for i in range(16):
+            nibble = format(i, '04b')
+            # 正向S盒变换
+            s_box_result = int(self.saes.nibble_substitution(nibble, self.saes.S_BOX), 2)
+            # 逆向S盒变换
+            inv_result = int(self.saes.nibble_substitution(format(s_box_result, '04b'), self.saes.INV_S_BOX), 2)
+            
+            if inv_result != i:
+                self.test_result_text.insert(tk.END, f"✗ S盒错误: 输入 {i:04b} -> S盒输出 {s_box_result:04b} -> 逆S盒输出 {inv_result:04b}\n")
+                all_ok = False
+            else:
+                self.test_result_text.insert(tk.END, f"✓ {nibble} -> {format(s_box_result, '04b')} -> {format(inv_result, '04b')}\n")
+        
+        if all_ok:
+            self.test_result_text.insert(tk.END, "\n🎉 S盒验证通过！\n")
+        else:
+            self.test_result_text.insert(tk.END, "\n❌ S盒验证失败！\n")
+    
+    def verify_mix_columns(self):
+        """验证列混淆"""
+        self.test_result_text.delete(1.0, tk.END)
+        self.test_result_text.insert(tk.END, "开始验证列混淆和逆列混淆...\n\n")
+        
+        # 测试多个状态矩阵
+        test_states = [
+            np.array([[1, 2], [3, 4]]),
+            np.array([[5, 6], [7, 8]]),
+            np.array([[9, 10], [11, 12]]),
+            np.array([[13, 14], [15, 0]])
+        ]
+        
+        all_ok = True
+        for i, state in enumerate(test_states):
+            self.test_result_text.insert(tk.END, f"测试状态 {i+1}:\n")
+            self.test_result_text.insert(tk.END, f"  原状态: {state[0, 0]:04b} {state[0, 1]:04b}\n")
+            self.test_result_text.insert(tk.END, f"          {state[1, 0]:04b} {state[1, 1]:04b}\n")
+            
+            # 列混淆
+            mixed = self.saes.mix_columns(state)
+            self.test_result_text.insert(tk.END, f"  混淆后: {mixed[0, 0]:04b} {mixed[0, 1]:04b}\n")
+            self.test_result_text.insert(tk.END, f"          {mixed[1, 0]:04b} {mixed[1, 1]:04b}\n")
+            
+            # 逆列混淆
+            inverted = self.saes.inverse_mix_columns(mixed)
+            self.test_result_text.insert(tk.END, f"  逆混淆: {inverted[0, 0]:04b} {inverted[0, 1]:04b}\n")
+            self.test_result_text.insert(tk.END, f"          {inverted[1, 0]:04b} {inverted[1, 1]:04b}\n")
+            
+            if np.array_equal(state, inverted):
+                self.test_result_text.insert(tk.END, "  ✓ 列混淆验证通过\n\n")
+            else:
+                self.test_result_text.insert(tk.END, "  ✗ 列混淆验证失败\n\n")
+                all_ok = False
+        
+        if all_ok:
+            self.test_result_text.insert(tk.END, "🎉 列混淆验证通过！\n")
+        else:
+            self.test_result_text.insert(tk.END, "❌ 列混淆验证失败！\n")
+    
+    def cross_test(self):
+        """交叉测试验证"""
+        # 使用标准测试用例验证
+        test_plaintext = "0110111101101011"
+        test_key = "1010011100111011"
+        expected_ciphertext = "0000011100111000"  # 预期结果
+        
+        actual_ciphertext = self.saes.encrypt(test_plaintext, test_key)
+        
+        self.test_result_text.delete(1.0, tk.END)
+        self.test_result_text.insert(tk.END, "交叉测试验证:\n\n")
+        self.test_result_text.insert(tk.END, f"明文: {test_plaintext}\n")
+        self.test_result_text.insert(tk.END, f"密钥: {test_key}\n")
+        self.test_result_text.insert(tk.END, f"预期密文: {expected_ciphertext}\n")
+        self.test_result_text.insert(tk.END, f"实际密文: {actual_ciphertext}\n\n")
+        
+        if actual_ciphertext == expected_ciphertext:
+            self.test_result_text.insert(tk.END, "✓ 交叉测试通过！\n所有实现应该得到相同结果")
+            messagebox.showinfo("交叉测试", "✓ 交叉测试通过！\n所有实现应该得到相同结果")
+        else:
+            self.test_result_text.insert(tk.END, "✗ 交叉测试失败\n")
+            messagebox.showerror("交叉测试", f"✗ 交叉测试失败\n预期: {expected_ciphertext}\n实际: {actual_ciphertext}")
+    
+    # 调试控制
+    def enable_debug(self):
+        self.saes.enable_debug()
+        self.double_saes.enable_debug()
+        self.triple_saes.enable_debug()
+        print("调试模式已开启")
+    
+    def disable_debug(self):
+        self.saes.disable_debug()
+        self.double_saes.disable_debug()
+        self.triple_saes.disable_debug()
+        print("调试模式已关闭")
+    
+    def clear_output(self):
+        self.debug_output.delete(1.0, tk.END)
+    
+    # 示例数据填充
+    def fill_basic_example(self):
+        self.plaintext_entry.delete(0, tk.END)
+        self.plaintext_entry.insert(0, "0110111101101011")
+        self.key_entry.delete(0, tk.END)
+        self.key_entry.insert(0, "1010011100111011")
+    
+    def fill_ascii_example(self):
+        self.ascii_text_entry.delete(0, tk.END)
+        self.ascii_text_entry.insert(0, "Hello AES!")
+        self.ascii_key_entry.delete(0, tk.END)
+        self.ascii_key_entry.insert(0, "1010011100111011")
+    
+    def fill_double_example(self):
+        self.double_plaintext_entry.delete(0, tk.END)
+        self.double_plaintext_entry.insert(0, "0110111101101011")
+        self.double_key_entry.delete(0, tk.END)
+        self.double_key_entry.insert(0, "10100111001110111010011100111011")
+    
+    def fill_triple_example(self):
+        self.triple_plaintext_entry.delete(0, tk.END)
+        self.triple_plaintext_entry.insert(0, "0110111101101011")
+        self.triple_key_entry.delete(0, tk.END)
+        self.triple_key_entry.insert(0, "10100111001110111010011100111011")
+    
+    def fill_mitm_example(self):
+        self.mitm_plaintext_entry.delete(0, tk.END)
+        self.mitm_plaintext_entry.insert(0, "0110111101101011")
+        self.mitm_ciphertext_entry.delete(0, tk.END)
+        self.mitm_ciphertext_entry.insert(0, "1101001010010111")
+    
+    def fill_cbc_example(self):
+        self.cbc_plaintext_entry.delete(0, tk.END)
+        self.cbc_plaintext_entry.insert(0, "0110111101101011 1100110011001100 1010101010101010")
+        self.cbc_key_entry.delete(0, tk.END)
+        self.cbc_key_entry.insert(0, "1010011100111011")
+        self.cbc_iv_entry.delete(0, tk.END)
+        self.cbc_iv_entry.insert(0, "1111000011110000")
+
+class TextRedirector:
+    """重定向print输出到文本框"""
+    def __init__(self, widget, tag="stdout"):
+        self.widget = widget
+        self.tag = tag
+    
+    def write(self, string):
+        self.widget.insert(tk.END, string)
+        self.widget.see(tk.END)
+        self.widget.update()
+    
+    def flush(self):
+        pass
+
+def main():
+    root = tk.Tk()
+    app = SAESApp(root)
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
